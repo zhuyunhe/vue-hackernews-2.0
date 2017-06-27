@@ -1,19 +1,25 @@
 const fs = require('fs')
 const path = require('path')
 const LRU = require('lru-cache')
-const express = require('express')
-const favicon = require('serve-favicon')
-const compression = require('compression')
+
+const Koa = require('koa')
+const app = new Koa()
+const serve = require('koa-static')
+// const serve = require('koa-static-server')
+const compress = require('koa-compress')
+const favicon = require('koa-favicon')
+const router = require('koa-router')()
+
+
 const resolve = file => path.resolve(__dirname, file)
 const { createBundleRenderer } = require('vue-server-renderer')
 
 const isProd = process.env.NODE_ENV === 'production'
 const useMicroCache = process.env.MICRO_CACHE !== 'false'
 const serverInfo =
-  `express/${require('express/package.json').version} ` +
+  `express/${require('koa/package.json').version} ` +
   `vue-server-renderer/${require('vue-server-renderer/package.json').version}`
 
-const app = express()
 
 const template = fs.readFileSync(resolve('./src/index.template.html'), 'utf-8')
 
@@ -54,16 +60,18 @@ if (isProd) {
   })
 }
 
-const serve = (path, cache) => express.static(resolve(path), {
-  maxAge: cache && isProd ? 1000 * 60 * 60 * 24 * 30 : 0
-})
 
-app.use(compression({ threshold: 0 }))
-app.use(favicon('./public/logo-48.png'))
-app.use('/dist', serve('./dist', true))
-app.use('/public', serve('./public', true))
-app.use('/manifest.json', serve('./manifest.json', true))
-app.use('/service-worker.js', serve('./dist/service-worker.js'))
+app.use(favicon(path.resolve(__dirname, 'src/assets/logo.png')))
+app.use(compress())
+
+
+app.use(serve(resolve('/dist')))
+app.use(serve(resolve('./public')))
+app.use(serve(resolve('./manifest.json')))
+app.use(serve(resolve('./dist/service-worker.js')))
+
+// router.get('/dist', serve(resolve('./dist')));
+
 
 // 1-second microcache.
 // https://www.nginx.com/blog/benefits-of-microcaching-nginx/
@@ -78,57 +86,77 @@ const microCache = LRU({
 // headers.
 const isCacheable = req => useMicroCache
 
-function render (req, res) {
+function render (ctx, next) {
   const s = Date.now()
 
-  res.setHeader("Content-Type", "text/html")
-  res.setHeader("Server", serverInfo)
+  // res.setHeader("Content-Type", "text/html")
+  // res.setHeader("Server", serverInfo)
+  ctx.set("Content-Type", "text/html")
+  ctx.set("Server", serverInfo)
 
-  const handleError = err => {
+  const handleError = (err,reject) => {
     if (err.url) {
-      res.redirect(err.url)
+      console.log('重定向')
+      ctx.redirect(err.url)
     } else if(err.code === 404) {
-      res.status(404).end('404 | Page Not Found')
+      ctx.status = 404
+      ctx.body = '404 | Page Not Found'
     } else {
       // Render Error Page or Redirect
-      res.status(500).end('500 | Internal Server Error')
-      console.error(`error during render : ${req.url}`)
+      ctx.status = 500
+      ctx.body = '500 | Internal Server Error'
+      console.error(`error during render : ${ctx.url}`)
       console.error(err.stack)
     }
+    reject()
   }
 
-  const cacheable = isCacheable(req)
+  const cacheable = isCacheable(ctx.req)
   if (cacheable) {
-    const hit = microCache.get(req.url)
+    const hit = microCache.get(ctx.url)
     if (hit) {
       if (!isProd) {
         console.log(`cache hit!`)
       }
-      return res.end(hit)
+      return ctx.end(hit)
     }
   }
 
   const context = {
     title: 'Vue HN 2.0', // default title
-    url: req.url
+    url: ctx.url
   }
-  renderer.renderToString(context, (err, html) => {
-    if (err) {
-      return handleError(err)
-    }
-    res.end(html)
-    if (cacheable) {
-      microCache.set(req.url, html)
-    }
-    if (!isProd) {
-      console.log(`whole request: ${Date.now() - s}ms`)
-    }
+  return new Promise((resolve, reject) => {
+    renderer.renderToString(context, (err, html) => {
+      if (err) {
+        return handleError(err,reject)
+      }
+      ctx.body =  html
+      resolve()
+      if (cacheable) {
+        microCache.set(ctx.url, html)
+      }
+      if (!isProd) {
+        console.log(`whole request: ${Date.now() - s}ms`)
+      }
+      return next()
+    })
+  }).catch( (err)=>{
+    return next()
   })
 }
 
-app.get('*', isProd ? render : (req, res) => {
-  readyPromise.then(() => render(req, res))
+app.use( (ctx, next) =>{
+  if(isProd){
+    return render(ctx, next)
+  } else{
+    return readyPromise.then(() => render(ctx, next))
+  }
 })
+
+app
+    .use(router.routes())
+    .use(router.allowedMethods());
 
 const port = process.env.PORT || 8080
 app.listen(port, () => {

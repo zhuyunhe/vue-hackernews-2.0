@@ -27,7 +27,7 @@ export default context => {
       const matchedComponents = router.getMatchedComponents()
       // no matched routes
       if (!matchedComponents.length) {
-        reject({ code: 404 })
+        reject({ code: 404, msg: 'zyh-test' })
       }
       // Call fetchData hooks on components matched by the route.
       // A preFetch hook dispatches a store action and returns a Promise,
